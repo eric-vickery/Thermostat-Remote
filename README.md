@@ -1,1 +1,129 @@
-# Thermostat_Remote
+# Thermostat Remote
+
+ESP32-C3 firmware for a remote unit that mirrors the heater state of a WiFi thermostat. The thermostat (the *master*) broadcasts whether the heater is ON or OFF over ESP-NOW. This remote finds the master automatically, follows its state, and tells the application when the link comes up, the state changes, or the link is lost.
+
+Built with ESP-IDF 6.1 for the ESP32-C3 (developed on the ESP32-C3 SuperMini).
+
+## Features
+
+- **No channel configuration.** The master follows the router's WiFi channel, which can change. The remote finds it by itself.
+- **Automatic discovery.** Until it hears from the master, the remote hops through channels 1 to 13 and broadcasts a hello on each one, dwelling 150 ms per channel.
+- **Self-healing link.** The master sends a state message every few seconds, which doubles as a heartbeat. If nothing arrives for 10 seconds, the link is declared lost and the scan restarts, so a master that moves to another channel is picked up again.
+- **Simple callback API.** One function is called when the link comes up, when the heater state changes, and when the link is lost.
+- **No router credentials.** The remote never joins a WiFi network. WiFi runs in station mode purely as the ESP-NOW radio.
+
+## How it works
+
+```
+ Remote                                   Master (thermostat)
+   |  -- HELLO (broadcast, ch N) -------->  |
+   |  -- HELLO (broadcast, ch N+1) ------>  |   remote hops channels
+   |  -- HELLO (broadcast, ch M) -------->  |   until the master hears it
+   |  <------------- STATE (unicast) -----  |   master pairs, answers at once
+   |                                        |   remote locks onto channel M
+   |  <------------- STATE every ~3 s ----  |   heartbeat + heater state
+   |                 ... silence 10 s ...   |
+   |  link lost, scan restarts              |
+```
+
+### Wire protocol
+
+Defined in [`espnow_protocol.h`](components/esp_now_remote/include/espnow_protocol.h). This file is shared with the master, and the copy in the master project must stay in step with this one.
+
+| Message | Direction | Delivery | Payload |
+|---|---|---|---|
+| `ESPNOW_MSG_HELLO` | Remote to master | Broadcast | Header only |
+| `ESPNOW_MSG_STATE` | Master to remote | Unicast, every few seconds | `on` (1 = heat ON), `seq` (wraps at 255) |
+
+Every message starts with a 4-byte header: magic `0x5448` ("TH"), protocol version, and message type. Messages with a wrong magic, version, type, or length are dropped.
+
+Once linked, the remote accepts state only from the master it first linked to and ignores messages from any other sender.
+
+## Project layout
+
+```
+.
+├── CMakeLists.txt
+├── main/
+│   └── main.cpp                      # NVS init, starts the remote, state callback
+└── components/
+    └── esp_now_remote/
+        ├── esp_now_remote.cpp        # scan, link tracking, ESP-NOW handling
+        └── include/
+            ├── esp_now_remote.hpp    # EspNowRemote class
+            └── espnow_protocol.h     # wire protocol shared with the master
+```
+
+## Usage
+
+```cpp
+#include "nvs_flash.h"
+#include "esp_now_remote.hpp"
+
+static EspNowRemote s_remote;
+
+static void on_state(bool heat_on, bool link_up)
+{
+    if (!link_up) {
+        // Link lost; heat_on holds the last known state
+        return;
+    }
+    // Drive an output, LED, display, etc. from heat_on
+}
+
+extern "C" void app_main(void)
+{
+    // NVS must be initialised by the application (see main.cpp)
+    ESP_ERROR_CHECK(s_remote.begin(on_state));
+}
+```
+
+`begin(callback, init_wifi = true)` starts the remote. Pass `init_wifi = false` if your application has already started WiFi.
+
+| Member | Description |
+|---|---|
+| `link_up()` | `true` while heartbeats are arriving |
+| `heat_on()` | Last heater state received |
+
+The callback runs on the remote's own task, not the WiFi task, so it is safe to do normal work in it. What to do when the link is lost is up to the application. For example, you might turn an output off or hold the last state.
+
+## Building and flashing
+
+Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/get-started/) 6.1 with the environment exported.
+
+```bash
+idf.py set-target esp32c3
+idf.py build
+idf.py -p /dev/cu.usbmodem* flash monitor
+```
+
+### ESP32-C3 SuperMini notes
+
+- The board uses the chip's native USB, so set the console to **USB Serial/JTAG** in `menuconfig`: `Component config > ESP System Settings > Channel for console output`.
+- **GPIO9** is the BOOT button and a boot-strapping pin. GPIO2 and GPIO8 are strapping pins too. Don't hang pulldowns on them, or the chip can boot into download mode ("waiting for download").
+- If the monitor drops the chip into download mode when it opens, use `idf.py monitor --no-reset`, or press the RESET button.
+
+## Configuration
+
+Timing constants live in [`esp_now_remote.hpp`](components/esp_now_remote/include/esp_now_remote.hpp):
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `MAX_CHANNEL` | 13 | Highest WiFi channel scanned |
+| `SCAN_DWELL_MS` | 150 | Time spent on each channel while scanning |
+| `LINK_TIMEOUT_MS` | 10000 | Silence before the link is considered lost |
+
+If the master's heartbeat interval changes, keep `LINK_TIMEOUT_MS` at roughly three times it.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Stuck at `Started, scanning for master` | The master isn't powered, or it runs a different protocol version. Check the `espnow_protocol.h` copies. Channels 12 and 13 may also be unavailable in some regions. |
+| Link drops repeatedly | The master's heartbeat is slower than `LINK_TIMEOUT_MS`, or the signal is marginal. |
+| No logs on the serial monitor | Console output is not set to USB Serial/JTAG. |
+| `waiting for download` | GPIO9 held low at reset. See the SuperMini notes above. |
+
+## License
+
+Released under the [MIT License](LICENSE).
