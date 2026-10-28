@@ -137,7 +137,6 @@ With `LED_LATCH_LINK_LOSS` set to 1 (the default), the solid state stays on afte
 
 - The relay input is driven through the module's optocoupler (an EL817 in the current build), so GPIO0 only has to supply the LED current through its resistor.
 - A 3.3 V relay coil drawing around 120 mA plus the ESP32-C3's WiFi bursts (up to 300 to 350 mA) puts the SuperMini's onboard regulator close to its limit. Add a 470 to 1000 µF capacitor across 3V3 and GND near the relay, or power the coil from a separate supply with the grounds tied together.
-- The red power LED is not on a GPIO and cannot be controlled in software.
 
 ## Building and flashing
 
@@ -154,7 +153,6 @@ idf.py -p /dev/cu.usbmodem* flash monitor
 - The board uses the chip's native USB, so set the console to **USB Serial/JTAG** in `menuconfig`: `Component config > ESP System Settings > Channel for console output`.
 - **GPIO9** is the BOOT button and a boot-strapping pin. GPIO2 and GPIO8 are strapping pins too. Don't hang pulldowns on them, or the chip can boot into download mode ("waiting for download").
 - If the monitor drops the chip into download mode when it opens, use `idf.py monitor --no-reset`, or press the RESET button.
-- The VS Code settings in `.vscode/settings.json` select the `esp32c3-builtin` OpenOCD config and pin the debug adapter to this board's USB serial number, which is its MAC address. Change the serial if you use a different board.
 
 ### Link logging
 
