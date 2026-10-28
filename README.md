@@ -11,6 +11,10 @@ Built with ESP-IDF 6.1 for the ESP32-C3 (developed on the ESP32-C3 SuperMini).
 - **Self-healing link.** The master sends a state message every few seconds, which doubles as a heartbeat. If nothing arrives for 10 seconds, the link is declared lost and the scan restarts, so a master that moves to another channel is picked up again.
 - **Simple callback API.** One function is called when the link comes up, when the heater state changes, and when the link is lost.
 - **No router credentials.** The remote never joins a WiFi network. WiFi runs in station mode purely as the ESP-NOW radio.
+- **Relay output.** GPIO0 follows the heater state: high when the heat is on, low when it is off. It is driven low as the first thing at startup.
+- **Failsafe.** If the link stays down past a grace period, the relay is forced off. The grace period is long enough that a master changing WiFi channel does not trip it.
+- **Status LED.** The onboard blue LED shows the link state without a serial monitor, and a drop leaves it lit as a record.
+- **Link diagnostics.** Every message from the master is logged with its sequence number, the time since the previous message, and RSSI, so link stability is visible in the monitor.
 
 ## How it works
 
@@ -45,7 +49,7 @@ Once linked, the remote accepts state only from the master it first linked to an
 .
 ├── CMakeLists.txt
 ├── main/
-│   └── main.cpp                      # NVS init, starts the remote, state callback
+│   └── main.cpp                      # relay, failsafe, status LED, starts the remote
 └── components/
     └── esp_now_remote/
         ├── esp_now_remote.cpp        # scan, link tracking, ESP-NOW handling
@@ -55,6 +59,8 @@ Once linked, the remote accepts state only from the master it first linked to an
 ```
 
 ## Usage
+
+The minimal pattern for using the component is below. [`main.cpp`](main/main.cpp) is the full application, with the relay, failsafe, and LED added to the callback.
 
 ```cpp
 #include "nvs_flash.h"
@@ -87,6 +93,52 @@ extern "C" void app_main(void)
 
 The callback runs on the remote's own task, not the WiFi task, so it is safe to do normal work in it. What to do when the link is lost is up to the application. For example, you might turn an output off or hold the last state.
 
+## Relay, failsafe and status LED
+
+All of this lives in [`main.cpp`](main/main.cpp), driven from the remote's state callback.
+
+### Relay output
+
+GPIO0 (`RELAY_GPIO`) is driven to `RELAY_ON_LEVEL` while the heat is on. At startup it is set to the off level before the pin becomes an output, and it stays off until the first link is established.
+
+Firmware cannot control the pin before `app_main` runs (the ROM and bootloader take a few hundred milliseconds), so **add a pull-down of about 10k from GPIO0 to GND** to keep the relay off from power-up and through resets.
+
+### Failsafe
+
+When the link is lost (no message for `LINK_TIMEOUT_MS`), the relay holds its last state and a timer starts. If the link has not recovered after `FAILSAFE_DELAY_MS` (30 s), the relay is forced off. If the master comes back first, the timer is cancelled and the current state is applied.
+
+A master changing WiFi channel costs the remote about `LINK_TIMEOUT_MS` plus a couple of seconds of scanning, which is well inside the grace period. In total the heat goes off roughly 40 s after the last message from a master that has really gone away.
+
+### Status LED
+
+The blue LED on GPIO8 (active low) shows the link state:
+
+| LED | Meaning |
+|---|---|
+| Flashing | Scanning for the master (boot) |
+| Off | Linked |
+| Solid on | The link has been lost |
+
+With `LED_LATCH_LINK_LOSS` set to 1 (the default), the solid state stays on after the link recovers. A past drop stays visible until the next reboot. Set it to 0 to turn the LED off again when the master returns.
+
+### Configuration
+
+| Define | Default | Meaning |
+|---|---|---|
+| `RELAY_GPIO` | `GPIO_NUM_0` | Relay output pin |
+| `RELAY_ON_LEVEL` | 1 | Pin level that turns the relay on (0 for active-low modules) |
+| `FAILSAFE_DELAY_MS` | 30000 | Time after the link is reported lost before the relay is forced off |
+| `LED_GPIO` | `GPIO_NUM_8` | Status LED pin |
+| `LED_ON_LEVEL` | 0 | Pin level that lights the LED |
+| `LED_BLINK_MS` | 250 | Flash half-period while scanning |
+| `LED_LATCH_LINK_LOSS` | 1 | Keep the LED on after a link drop recovers |
+
+### Hardware notes
+
+- The relay input is driven through the module's optocoupler (an EL817 in the current build), so GPIO0 only has to supply the LED current through its resistor.
+- A 3.3 V relay coil drawing around 120 mA plus the ESP32-C3's WiFi bursts (up to 300 to 350 mA) puts the SuperMini's onboard regulator close to its limit. Add a 470 to 1000 µF capacitor across 3V3 and GND near the relay, or power the coil from a separate supply with the grounds tied together.
+- The red power LED is not on a GPIO and cannot be controlled in software.
+
 ## Building and flashing
 
 Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/get-started/) 6.1 with the environment exported.
@@ -102,6 +154,17 @@ idf.py -p /dev/cu.usbmodem* flash monitor
 - The board uses the chip's native USB, so set the console to **USB Serial/JTAG** in `menuconfig`: `Component config > ESP System Settings > Channel for console output`.
 - **GPIO9** is the BOOT button and a boot-strapping pin. GPIO2 and GPIO8 are strapping pins too. Don't hang pulldowns on them, or the chip can boot into download mode ("waiting for download").
 - If the monitor drops the chip into download mode when it opens, use `idf.py monitor --no-reset`, or press the RESET button.
+- The VS Code settings in `.vscode/settings.json` select the `esp32c3-builtin` OpenOCD config and pin the debug adapter to this board's USB serial number, which is its MAC address. Change the serial if you use a different board.
+
+### Link logging
+
+While linked, each message from the master produces a line like:
+
+```
+Message from master: heat ON, seq 42, 3012 ms since last, RSSI -58 dBm
+```
+
+Gaps close to the master's heartbeat interval and consecutive sequence numbers mean a stable link. A gap approaching `LINK_TIMEOUT_MS` or a jump in `seq` means messages are being missed. RSSI around -80 dBm or worse is marginal.
 
 ## Configuration
 
@@ -123,6 +186,8 @@ If the master's heartbeat interval changes, keep `LINK_TIMEOUT_MS` at roughly th
 | Link drops repeatedly | The master's heartbeat is slower than `LINK_TIMEOUT_MS`, or the signal is marginal. |
 | No logs on the serial monitor | Console output is not set to USB Serial/JTAG. |
 | `waiting for download` | GPIO9 held low at reset. See the SuperMini notes above. |
+| Relay clicks or board resets when the heat comes on | The 3V3 regulator is overloaded by the coil. See the hardware notes above. |
+| LED solid on although the master is back | `LED_LATCH_LINK_LOSS` is 1; reboot to clear it, or set it to 0. |
 
 ## License
 
