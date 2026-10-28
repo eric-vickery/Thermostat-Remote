@@ -15,10 +15,51 @@
 // long after it was reported lost, so a channel change does not trip the failsafe.
 #define FAILSAFE_DELAY_MS   30000
 
+// Status LED (blue LED on the SuperMini, active low): flashes while looking for the master,
+// off while linked, solid on after the link has been lost. With LED_LATCH_LINK_LOSS the solid
+// state stays on even after the link recovers, so a past drop is visible without the serial
+// monitor; set it to 0 to turn the LED off again once the master is back.
+#define LED_GPIO            GPIO_NUM_8
+#define LED_ON_LEVEL        0
+#define LED_BLINK_MS        250
+#define LED_LATCH_LINK_LOSS 1
+
 static const char *TAG = "main";
 
 static EspNowRemote s_remote;
 static esp_timer_handle_t s_failsafe_timer;
+static esp_timer_handle_t s_blink_timer;
+
+enum class LedMode { Blink, Off, Solid };
+static volatile LedMode s_led_mode = LedMode::Blink;
+static bool s_link_was_lost = false;
+
+static void led_write(bool on)
+{
+    gpio_set_level(LED_GPIO, on ? LED_ON_LEVEL : !LED_ON_LEVEL);
+}
+
+static void blink_cb(void *arg)
+{
+    static bool on = false;
+    if (s_led_mode != LedMode::Blink) {
+        return;
+    }
+    on = !on;
+    led_write(on);
+}
+
+static void led_set_mode(LedMode mode)
+{
+    s_led_mode = mode;
+    if (mode == LedMode::Blink) {
+        esp_timer_stop(s_blink_timer);
+        esp_timer_start_periodic(s_blink_timer, (uint64_t)LED_BLINK_MS * 1000);
+        return;
+    }
+    esp_timer_stop(s_blink_timer);
+    led_write(mode == LedMode::Solid);
+}
 
 static void relay_set(bool on)
 {
@@ -41,9 +82,12 @@ static void on_state(bool heat_on, bool link_up)
         ESP_LOGW(TAG, "Link lost, holding heat %s for up to %d ms", heat_on ? "ON" : "OFF", FAILSAFE_DELAY_MS);
         esp_timer_stop(s_failsafe_timer);
         esp_timer_start_once(s_failsafe_timer, (uint64_t)FAILSAFE_DELAY_MS * 1000);
+        s_link_was_lost = true;
+        led_set_mode(LedMode::Solid);
         return;
     }
     esp_timer_stop(s_failsafe_timer);
+    led_set_mode((LED_LATCH_LINK_LOSS && s_link_was_lost) ? LedMode::Solid : LedMode::Off);
     ESP_LOGI(TAG, "Heat %s", heat_on ? "ON" : "OFF");
     relay_set(heat_on);
 }
@@ -54,6 +98,20 @@ extern "C" void app_main(void)
     gpio_reset_pin(RELAY_GPIO);
     gpio_set_level(RELAY_GPIO, !RELAY_ON_LEVEL);
     gpio_set_direction(RELAY_GPIO, GPIO_MODE_OUTPUT);
+
+    gpio_reset_pin(LED_GPIO);
+    gpio_set_level(LED_GPIO, !LED_ON_LEVEL);
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+
+    const esp_timer_create_args_t blink_args = {
+        .callback = blink_cb,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "blink",
+        .skip_unhandled_events = false,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&blink_args, &s_blink_timer));
+    led_set_mode(LedMode::Blink);
 
     const esp_timer_create_args_t timer_args = {
         .callback = failsafe_cb,
