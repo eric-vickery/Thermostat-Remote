@@ -41,6 +41,7 @@ private:
         uint8_t src[6];
         uint8_t on;
         uint8_t seq;
+        int8_t rssi;
     };
 
     static void task_entry_(void *arg);
@@ -54,6 +55,7 @@ private:
     StateCallback _callback = nullptr;
     QueueHandle_t _rx_queue = nullptr;
     uint8_t _master_mac[6] = {};
+    int64_t _last_rx_us = 0;
     volatile bool _linked = false;
     volatile bool _heat_on = false;
 

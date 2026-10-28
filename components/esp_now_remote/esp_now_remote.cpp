@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 
 static const char *TAG = "Thermostat_Remote";
@@ -101,6 +102,7 @@ void EspNowRemote::recv_cb_(const esp_now_recv_info_t *info, const uint8_t *data
     memcpy(msg.src, info->src_addr, 6);
     msg.on = m->on;
     msg.seq = m->seq;
+    msg.rssi = info->rx_ctrl ? info->rx_ctrl->rssi : 0;
     xQueueSend(s_instance->_rx_queue, &msg, 0);
 }
 
@@ -141,9 +143,11 @@ void EspNowRemote::task_()
 void EspNowRemote::handle_state_(const RxMsg &msg)
 {
     bool on = msg.on != 0;
+    int64_t now_us = esp_timer_get_time();
 
     if (!_linked) {
         memcpy(_master_mac, msg.src, 6);
+        _last_rx_us = now_us;
         _linked = true;
         _heat_on = on;
         ESP_LOGI(TAG, "Linked to master " MACSTR ", heat %s", MAC2STR(_master_mac), on ? "ON" : "OFF");
@@ -157,6 +161,10 @@ void EspNowRemote::handle_state_(const RxMsg &msg)
                  MAC2STR(msg.src), MAC2STR(_master_mac));
         return;
     }
+    ESP_LOGI(TAG, "Message from master: heat %s, seq %u, %lu ms since last, RSSI %d dBm",
+             on ? "ON" : "OFF", (unsigned)msg.seq,
+             (unsigned long)((now_us - _last_rx_us) / 1000), (int)msg.rssi);
+    _last_rx_us = now_us;
     if (on != _heat_on) {
         _heat_on = on;
         ESP_LOGI(TAG, "Heat %s (seq %u)", on ? "ON" : "OFF", (unsigned)msg.seq);
